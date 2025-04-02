@@ -1,2 +1,7 @@
 all: main.cpp
-	g++ main.cpp & ./a.out
+	g++ -pthread main_other.cpp
+	./a.out
+
+
+clean: 
+	rm a.out 

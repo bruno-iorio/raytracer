@@ -1,14 +1,15 @@
 #define _CRT_SECURE_NO_WARNINGS 1
-#include <vector>
-#include <ctime>
-#include <thread>
 #define RAND_MAX 1e20
 #define PI  3.14159265358979
 #define STB_IMAGE_WRITE_IMPLEMENTATION
-#include "stb_image_write.h"
 #define STB_IMAGE_IMPLEMENTATION
+
+#include "stb_image_write.h"
 #include "stb_image.h"
 #include <iostream>
+#include <vector>
+#include <ctime>
+#include <omp.h>
 
 
 double sqr(double x){return x*x;}
@@ -59,13 +60,15 @@ double dot(const Vector& a, const Vector& b) {
 Vector cross(const Vector& a, const Vector& b) {
     return Vector(a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]);
 }
- 
+
 class LightSource{
     public:
-        LightSource(const Vector& pos, double I){
-            this->pos  = pos;
-            this->I = I;
-        }
+        LightSource(const Vector& pos, double I)
+        : pos(pos), I(I) {}
+
+        LightSource()
+        : pos(Vector(0,0,0)), I(1e8) {}
+
         Vector pos;
         double I;
 };
@@ -73,8 +76,8 @@ class LightSource{
 class Ray {
 public:
     Ray(const Vector& O ,const Vector& u) 
-    : O(O),u(u){}
-    Ray() 
+    : O(O),u(u) {}
+    Ray()
     : O(Vector(0,0,0)),u(Vector(0,0,0)){}
 
     Vector O;
@@ -126,7 +129,7 @@ class Scene{
             double d,c1,c2,c3;
 
             Sphere s(Vector(0,0,0),0,Vector(0,0,0),false,false,1);
-            if (this->intersect(r,d,s,P2,N2,in)){
+            if (this->intersect(r,s,P2,in)){
                 if(std::pow((P2 - P1).norm(),2) <= std::pow((L-P2).norm(),2)){
                     return true;
                 }
@@ -135,21 +138,27 @@ class Scene{
             return false;
         }
 
-    bool get_color(Ray& r,int raydepth ,Vector& P, Vector& N,Sphere& s,double& dist,double& color1, double& color2, double& color3,bool &in){
+    bool get_color(Ray r,int raydepth ,double& color1, double& color2, double& color3,bool &in){
             if(raydepth == 0){
                 return false;
             }
-            bool res = this->intersect(r,dist,s,P,N,in);
+            
+            Vector P,N;
+            Sphere s;
+            
+            bool res = this->intersect(r,s,P,in);
             double I = light_source.I;
 
             Vector L = light_source.pos;
             Vector ro = s.albedo;
-            Vector shadow_inter(0,0,0);
-
+            Vector shadow_inter;
+            N = P - s.C;
+            N.normalize();
 
             if(s.mirror){ //if mirror just computes reflection
                 Ray r_ref(P + 1e-4* N, r.u - 2*dot(r.u,N) * N);
-                res = this->get_color(r_ref,raydepth-1,P,N,s,dist,color1,color2,color3,in);
+                res = this->get_color(r_ref,raydepth-1,color1,color2,color3,in);
+                return res;
             }
             else if(s.transparent){ //annoyting as hell!
                                     // dot(N,r.u) < 0 := (N and r.u have different orientation) == r.u is entering the ball
@@ -171,8 +180,7 @@ class Scene{
 
               if (1 - sqr(n1/n2)*(1 - sqr(dot(w_i,N))) < 0){ // total reflection occurs
                 Ray r_reflec(P2, w_i - 2*dot(w_i,N) * N);
-                res = this->get_color(r_reflec, raydepth - 1, P, N, s, dist, color1, color2, color3, in2);
-                printf("b");
+                return this->get_color(r_reflec, raydepth-1,color1,color2,color3,in2);
               }
               else{
                 Vector w_t = (n1/n2) * (w_i - dot(w_i,N)*N);
@@ -180,34 +188,37 @@ class Scene{
                 Vector w = in1 ? w_t - w_n : w_t + w_n;
                 Ray r_refrac(P1, w);
                 Ray r_reflec(P2 ,w_i - 2*dot(w_i,N)*N);
+
                 if(((double) rand()) / ((double) RAND_MAX) <= T){ // refracted ray :
-                  res &= this->get_color(r_refrac, raydepth - 1, P, N, s, dist, color1,color2 , color3, in1);
+                  res &= this->get_color(r_refrac,raydepth-1,color1,color2,color3,in1);
                 }
                 else{ //reflected ray :
-                  res &= this->get_color(r_reflec,raydepth - 1,P,N,s,dist,color1,color2,color3,in2);
+                  res &= this->get_color(r_reflec,raydepth-1,color1,color2,color3,in2);
                 }
+                return res;
               }
-            } 
             
+            }
+
             else{
               color1 = I/(4 * PI * dot(L-P,L-P)) * ro[0]/PI * dot(N,(L - P)/sqrt(dot(L - P,L - P)));
               color2 = I/(4 * PI * dot(L-P,L-P)) * ro[1]/PI * dot(N,(L - P)/sqrt(dot(L - P,L - P)));
               color3 = I/(4 * PI * dot(L-P,L-P)) * ro[2]/PI * dot(N,(L - P)/sqrt(dot(L - P,L - P)));
             }
             
-
             if(dot(N,(L-P)/sqrt(dot(L-P,L-P))) < 0 || this->detect_shadow(P,N,s,shadow_inter,in)){
                 color1 = 0;
                 color2 = 0;
                 color3 = 0;
+                res = false;
             }
         return res;
     }
 
-    bool intersect(Ray& r , double& dist, Sphere& s, Vector& P,Vector& N, bool &in){
+    bool intersect(Ray r, Sphere& s, Vector& P, bool &in){
         double distance = 1e10;
         bool found = false;
-        Vector P1(0,0,0), origin = r.O;
+        Vector P1, origin(0,0,0);
         std::vector<Sphere>::iterator id = objects.begin(); 
 
         for(std::vector<Sphere>::iterator i = objects.begin(); i != objects.end(); i++){
@@ -226,29 +237,25 @@ class Scene{
             }
         }
         if (found){
-            dist = distance;
             s = *id;
             P = P1;
-            N = P - s.C;
-            N.normalize();
         }
         return found;
     }
+
     double n; 
     std::vector<Sphere> objects;
     LightSource light_source;
 
 };
 
-void get_color(Scene scene, Ray r, int raydepth, Vector P, Vector N, Sphere s, double dist,
-               double& color1, double& color2, double& color3, bool in, bool& res) {
-    res = scene.get_color(std::ref(r), raydepth, std::ref(P), std::ref(N), std::ref(s), std::ref(dist), color1, color2, color3, std::ref(in));
-}
+
 int main() {
     srand(time(0));
+    double gamma=2.2;
     int W = 512;
     int H = 512;
-    int rays_pixel = 40;
+    int rays_pixel = 100;
     Vector Camera_origin(0,0,55);
     Vector origin(0,0,0);
 
@@ -258,10 +265,10 @@ int main() {
     double d = -W/(2*tan(fov/2));
 
     // Creating objects
-    Sphere main_sphere1(Vector(0,0,0),10,Vector(0.8,0.8,0.8),false,false,1.5);
+    Sphere main_sphere1(Vector(0,0,0),10,Vector(0.8,0.8,0.8),false,true,1.5);
     Sphere main_sphere2(Vector(21,0,0),10,Vector(0.8,0.8,0.8),true,false,1.33);
-    Sphere main_sphere3(Vector(-21,0,0),10,Vector(0.8,0.8,0.8),false,true,1.5);
-    Sphere main_sphere4(Vector(-21,0,0),0.7,Vector(0.8,0.8,0.8),false,true,1);
+    Sphere main_sphere3(Vector(-21,0,0),10,Vector(0.8,0.8,0.8),false,false,1.5);
+    Sphere main_sphere4(Vector(-21,0,0),0.7,Vector(0.8,0.8,0.8),false,false,1);
     Sphere wall_left(Vector(-1000,0,0),940,Vector(0.9,0.2,0.9),false,false,1);
     Sphere wall_front(Vector(0,0,1000),940,Vector(0.9,0.4,0.3),false,false,1);
     Sphere wall_back(Vector(0,0,-1000),940,Vector(0.4,0.8,0.7),false,false,1);
@@ -274,47 +281,46 @@ int main() {
     std::vector<unsigned char> image(W * H * 3, 0);
 
     Scene scene(objects,light_source,1);
-    std::vector<std::thread> threads(rays_pixel);
-    
+    omp_set_num_threads(rays_pixel);
+
+    std::vector<unsigned char> image1[rays_pixel];
+    for (int i = 0; i < rays_pixel; i++){
+      image1[i] = std::vector<unsigned char>(W * H * 3, 0);
+    }
+
+    #pragma omp parallel
+    {
+    int thread_id = omp_get_thread_num();
     for (int i = 0; i < H; i++) {
         for (int j = 0; j < W; j++) {
-            double color1=0, color2=0, color3=0,gamma=2.2;
-            double c1[rays_pixel],c2[rays_pixel],c3[rays_pixel];
-            bool res1[rays_pixel];
-            for (int k = 0; k < rays_pixel; k++){
-              Vector dir_vec(j-W/2 + 0.5, H/2 - i + 0.5, d);
-              dir_vec.normalize();
-
-              Ray dir_ray(Camera_origin,dir_vec);
-              Vector intersec(0,0,0), N(0,0,0);
-              Sphere sphere(origin,0,Vector(0,0,0),false,false,1);
-              double dist = 0;
-              bool cam_env = false;
-              threads[k] = std::thread(&get_color, scene, dir_ray, 100, intersec,
-                                              N, sphere, dist, std::ref(c1[k]),
-                                              std::ref(c2[k]), std::ref(c3[k]), cam_env, std::ref(res1[k]));
-
-            }
-            bool res = true;
-            for (int k = 0 ; k < rays_pixel; k++){
-              threads[k].join();
-              res = res & res1[k];
-              color1 += c1[k]/rays_pixel;
-              color2 += c2[k]/rays_pixel;
-              color3 += c3[k]/rays_pixel;
-            }
-            if (res){
-              image[(i * W + j) * 3 + 0] = std::min(255.0, std::pow(color1,1/gamma));
-              image[(i * W + j) * 3 + 1] = std::min(255.0, std::pow(color2,1/gamma));
-              image[(i * W + j) * 3 + 2] = std::min(255.0, std::pow(color3,1/gamma));
-            }
-            else{
-              image[(i * W + j) * 3 + 0] = 0;
-              image[(i * W + j) * 3 + 1] = 0;
-              image[(i * W + j) * 3 + 2] = 0;
-            }
+            Vector dir_vec(j-W/2 + 0.5, H/2 - i + 0.5, d);
+            dir_vec.normalize();
+            Ray dir_ray(Camera_origin,dir_vec);
+            double color1=0,color2=0,color3=0;
+            bool cam_env = false;
+            if (scene.get_color(dir_ray,100,color1,color2,color3,cam_env)){
+              image1[thread_id][(i * W + j) * 3 + 0] = (unsigned char) std::min(255.0, std::pow(color1,1/gamma));
+              image1[thread_id][(i * W + j) * 3 + 1] = (unsigned char) std::min(255.0, std::pow(color2,1/gamma));
+              image1[thread_id][(i * W + j) * 3 + 2] = (unsigned char) std::min(255.0, std::pow(color3,1/gamma));
+          }
         }
+      }
     }
+
+    for (int i = 0; i < H; i++){
+      for (int j = 0; j < W; j++){
+        int k = 0;
+        double color1=0,color2=0,color3=0;
+        for (int id = 0 ; id < rays_pixel; id++){
+             color1 += image1[id][(i * W + j) * 3 + 0];
+             color2 += image1[id][(i * W + j) * 3 + 1];
+             color3 += image1[id][(i * W + j) * 3 + 2];
+        }
+        image[(i * W + j) * 3 + 0] = color1/(double)rays_pixel;
+        image[(i * W + j) * 3 + 1] = color2/(double)rays_pixel;
+        image[(i * W + j) * 3 + 2] = color3/(double)rays_pixel;
+        }
+      }
     stbi_write_png("image.png", W, H, 3, &image[0], 0);
     return 0;
 }
